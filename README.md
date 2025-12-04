@@ -1,20 +1,24 @@
-# convert_images_to_webp
+# convert_images_to_webp.py
 
-A generic, project-independent helper script to convert images already stored in Plone to WebP.
-It is designed for Plone 6 / Cookieplone-based backends and works with both classic Plone sites and Volto projects.
+A script to convert images already stored in Plone to WebP.
+
+The script is **project-independent** and works with **any Plone 6 backend**
+(Cookieplone/uv, Buildout, custom venv, Docker).
+It performs only the image conversion — all deployment logic (start/stop,
+cron automation, etc.) lives outside the script.
 
 ---
 
-## Features
+## What the script does
 
-- Converts existing images to WebP
-- Supports PNG transparency (keeps alpha channel)
-- Configurable quality via environment variable (`QUALITY`)
-- Dry-run mode (`DRY_RUN=1`) that performs no writes
-- Batch commits and optional database packing
-- Live progress bar in the terminal (including ETA and processed object count)
+- Converts existing image fields to WebP
+- Preserves PNG transparency (alpha channel)
+- Skips images already stored as WebP
+- Shows a live progress bar (percent, count, ETA)
+- Allows dry-run mode to verify changes without writing anything
+- Supports configurable WebP quality
 
-By default, the script processes the following content types:
+By default, these Plone content types are scanned:
 
 - `Image`
 - `News Item`
@@ -22,7 +26,7 @@ By default, the script processes the following content types:
 - `File`
 - `Document`
 
-and checks the following fields on those objects:
+The script checks these fields:
 
 - `image`
 - `event_image`
@@ -30,208 +34,135 @@ and checks the following fields on those objects:
 
 ---
 
-## Progress display
-
-While running, the script shows a live progress bar in the terminal:
-
-- current progress in percent
-- number of objects processed so far
-- estimated time remaining (ETA)
-- graphical bar display (██████░░░░…)
-- every 50 objects an additional progress line is written to the logfile
-
-Example terminal output:
-
-```bash
-[██████████░░░░░░░░░░░░░░░]  34.2%  171/500  ETA 12.4s
-```
-
-The display is updated continuously while the script runs and finishes with a clean newline.
-
----
-
 ## Requirements
 
-- Plone 6
-- Working backend environment with `make` and `zconsole`
-- Pillow installed in the backend (covered by Plone dependencies)
-- Typical Cookieplone/uv-style backend structure, e.g.:
-  - `backend/.venv`
-  - `backend/instance/etc/zope.conf`
-  - `backend/instance/etc/zope.ini`
-  - `backend/scripts/convert_images_to_webp.py`
-  - `backend/scripts/run_webp_job.sh`
+- Plone 6 backend (Volto or Classic)
+- Pillow (already included in Plone)
+- A working `zconsole` binary
+
+Your backend may provide `zconsole` at:
+
+| Setup               | Path                          |
+|--------------------|-------------------------------|
+| Cookieplone / uv   | `.venv/bin/zconsole`          |
+| Buildout           | `bin/zconsole`                |
+| Custom venv        | `<venv>/bin/zconsole`         |
+| Docker image       | `/plone/instance/bin/zconsole` (example) |
+
+Find it via:
+
+```bash
+find . -type f -name "zconsole"
+```
 
 ---
 
 ## Configuration (environment variables)
 
-The script reads its configuration from environment variables:
+The script reads three simple environment variables:
 
-- `QUALITY`
-  JPEG/WebP quality (0–100)
+- **QUALITY**
+  WebP quality (0–100)
   Default: `85`
 
-- `DRY_RUN`
-  `1` → dry run only, no changes written
-  `0` → (default) real conversion, changes are persisted
+- **DRY_RUN**
+  `1` → simulate conversion (no writes)
+  `0` → real conversion
+  Default: `0`
 
-- `PLONE_SITE_ID`
-  Plone site id to operate on (default: `Plone`)
+- **PLONE_SITE_ID**
+  Plone site to operate on
+  Default: `Plone`
 
-Examples:
+If none are set, defaults are used.
+
+---
+
+## One-off execution
+
+### 1. Find your zconsole path
+
+Example (Cookieplone):
 
 ```bash
-QUALITY=70 DRY_RUN=1 make convert-images-to-webp
-QUALITY=80 make convert-images-to-webp
+.venv/bin/zconsole
+```
+
+Example (Buildout):
+
+```bash
+bin/zconsole
+```
+
+Use whichever exists.
+
+---
+
+### 2. Dry-run test (recommended)
+
+```bash
+cd /path/to/backend
+
+DRY_RUN=1 QUALITY=75   <path-to-zconsole> run instance/etc/zope.conf scripts/convert_images_to_webp.py
 ```
 
 ---
 
-## Makefile integration
-
-```make
-.PHONY: convert-images-to-webp
-convert-images-to-webp: $(VENV_FOLDER) instance/etc/zope.ini ## Convert all stored images to WEBP
-	@$(BIN_FOLDER)/zconsole run instance/etc/zope.conf ./scripts/convert_images_to_webp.py
-```
-
-### Running via Makefile
-
-From the backend folder:
+### 3. Real conversion
 
 ```bash
-cd backend
-make convert-images-to-webp
+DRY_RUN=0 QUALITY=85   <path-to-zconsole> run instance/etc/zope.conf scripts/convert_images_to_webp.py
 ```
 
-### With custom quality:
-
-```bash
-QUALITY=70 make convert-images-to-webp
-```
-
-### Dry-run mode (log only, no changes):
-
-```bash
-DRY_RUN=1 make convert-images-to-webp
-```
+The script prints everything to stdout
+(progress bar, converted objects, skipped items, errors).
 
 ---
 
-## Direct execution via zconsole (without make)
+## Cron job with backend start/stop
 
-```bash
-cd backend
-. .venv/bin/activate
-QUALITY=75 DRY_RUN=1 .venv/bin/zconsole run instance/etc/zope.conf ./scripts/convert_images_to_webp.py
+If your project requires temporarily shutting down the backend during
+conversion (e.g. to avoid blob conflicts), this can be automated via the
+accompanying `run_webp_job.sh`.
+
+Example cronjob (runs daily at 03:00):
+
+```cron
+0 3 * * * /path/to/backend/scripts/run_webp_job.sh
 ```
 
----
+The provided `run_webp_job.sh`:
 
-## Behavior
+- stops the backend (runwsgi)
+- executes the WebP converter via zconsole
+- restarts the backend
+- writes all output to:
 
-### Normal mode (`DRY_RUN=0`)
-
-- Images are converted to WebP
-- The image fields are replaced with new `NamedBlobImage` values
-- Objects are reindexed in the catalog
-- `transaction.commit()` is called regularly in batches
-- At the end, the ZODB is packed (`db.pack()`)
-
-### Dry-run mode (`DRY_RUN=1`)
-
-- All matching objects are iterated
-- Conversion is simulated, including decoding the images
-- No changes are written
-- No commits, no database packing
-- The logfile shows exactly which objects/fields would be converted
-
----
-
-## Important notes
-
-- The script overwrites original image data – there is no automatic backup.
-- Before using it in production, always create a backup of `Data.fs` and the blob storage.
-- Typical nightly execution (e.g. at 03:00) is handled via cron/systemd and not part of the Python script itself.
-
----
-
-## Automated WebP cron job (`run_webp_job.sh`)
-
-In addition to the Python script, there is a shell script that automates the full workflow:
-
-1. Stop the backend (runwsgi process)
-2. Run `convert_images_to_webp.py` via zconsole
-3. Restart the backend via runwsgi
-4. Log all steps to a dedicated logfile
-
-Project path:
-
-- `backend/scripts/run_webp_job.sh`
-
-The script derives the backend path dynamically from its own location, so it works on different systems without hard-coded paths.
-
-### Make the script executable
-
-From the backend folder:
-
-```bash
-cd backend
-chmod +x scripts/run_webp_job.sh
+```
+backend/var/log/webp_cron.log
 ```
 
-Optional dry-run test:
+To run it manually:
 
 ```bash
 DRY_RUN=1 QUALITY=80 ./scripts/run_webp_job.sh
 ```
 
-Inspect the log output:
+You may override:
 
 ```bash
-tail -n 100 var/log/webp_cron.log
+DRY_RUN=1 QUALITY=50 LOGFILE=/custom/log/path ./scripts/run_webp_job.sh
 ```
 
 ---
 
-## Setting up a cron job
+## Operational notes & safety
 
-The automatic execution can be handled via cron (or a systemd timer).
-Choose a time with low traffic, for example 03:00 at night.
-
-### Example cron job (production, daily at 03:00)
-
-```bash
-0 3 * * * DRY_RUN=0 QUALITY=85 /path/to/backend/scripts/run_webp_job.sh >> /path/to/backend/var/log/webp_cron.log 2>&1
-```
-
-Explanation:
-
-- `0 3 * * *` → run every day at 03:00
-- `DRY_RUN=0` → real conversion, changes are persisted
-- `QUALITY=85` → WebP quality, can be adjusted per project
-- `run_webp_job.sh` → stops the backend, runs the converter, restarts the backend
-- `>> … 2>&1` → append all output (STDOUT + STDERR) to the log file
-
-### Example cron job for an initial test (dry-run)
-
-```bash
-0 3 * * * DRY_RUN=1 QUALITY=80 /path/to/backend/scripts/run_webp_job.sh >> /path/to/backend/var/log/webp_cron.log 2>&1
-```
-
-In this mode:
-
-- all objects are iterated and images decoded
-- no changes are written
-- no database packing is performed
-- this is ideal for validating configuration and paths
-
----
-
-## Operations & recommendations
-
-- Always create a recent backup of `Data.fs` and the blob storage before using the script in production.
-- While the job is running, the backend will be temporarily unavailable (stopped and restarted).
-- Runtime depends directly on the number and size of stored images.
-- The logfile `backend/var/log/webp_cron.log` should be monitored regularly and rotated/archived as needed.
+- With `DRY_RUN=0` the script **overwrites original images**.
+  There is no built-in backup or undo.
+- Always create a backup of:
+  - `Data.fs`
+  - blob directory
+- The initial run may take significant time depending on object count and image sizes.
+- Always start with a **dry run** and review the logfile.
+- Ideally run during low traffic times (e.g. late night).
