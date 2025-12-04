@@ -1,66 +1,59 @@
 #!/usr/bin/env bash
-# Fail fast: exit on error, undefined vars, or failed pipes
 set -euo pipefail
 
-# Resolve the directory where this script lives
+# Directory of this script (…/backend/scripts)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-
-# Backend root is the parent directory of /scripts
+# Backend root (…/backend)
 BACKEND="$(dirname "$SCRIPT_DIR")"
 
-# Path to the virtualenv used by the Plone backend
-VENV="$BACKEND/.venv"
+# Virtualenv & binaries (override via env if needed)
+VENV="${VENV:-"$BACKEND/.venv"}"
+ZCONSOLE="${ZCONSOLE:-"$VENV/bin/zconsole"}"
+RUNWSGI="${RUNWSGI:-"$VENV/bin/runwsgi"}"
 
-# Zope/Plone helper binaries from the virtualenv
-ZCONSOLE="$VENV/bin/zconsole"
-RUNWSGI="$VENV/bin/runwsgi"
+# Zope configs (override via env if needed)
+ZOPE_CONF="${ZOPE_CONF:-"$BACKEND/instance/etc/zope.conf"}"
+ZOPE_INI="${ZOPE_INI:-"$BACKEND/instance/etc/zope.ini"}"
 
-# Zope config for zconsole (ZConfig format)
-ZOPE_CONF="$BACKEND/instance/etc/zope.conf"
-# Zope config for runwsgi (INI format)
-ZOPE_INI="$BACKEND/instance/etc/zope.ini"
-
-# Python script that performs the WebP conversion
-SCRIPT="$BACKEND/scripts/convert_images_to_webp.py"
+# Python script that performs the WebP conversion (override via env if needed)
+SCRIPT="${SCRIPT:-"$BACKEND/scripts/convert_images_to_webp.py"}"
 
 # Log file for this cron-driven job
-LOGFILE="$BACKEND/var/log/webp_cron.log"
-
-# Ensure log directory exists
+LOGFILE="${LOGFILE:-"$BACKEND/var/log/webp_cron.log"}"
 mkdir -p "$(dirname "$LOGFILE")"
 
-echo "--------------------------------------------------" >> "$LOGFILE"
-echo "$(date '+%Y-%m-%d %H:%M:%S')  WebP CRON JOB START" >> "$LOGFILE"
-
-echo "Stopping backend..." >> "$LOGFILE"
-
-# Find the runwsgi process that uses zope.ini (if any)
-PID=$(pgrep -f "runwsgi.*zope.ini" || true)
-
-if [ -n "$PID" ]; then
-    # Gracefully kill the running backend
-    echo "Killing runwsgi PID: $PID" >> "$LOGFILE"
-    kill "$PID"
-    sleep 3
-else
-    # Nothing to stop – backend is already down
-    echo "Backend not running (no PID found)." >> "$LOGFILE"
-fi
-
-echo "Running WebP converter..." >> "$LOGFILE"
-
-# Allow overriding DRY_RUN and QUALITY from the environment
+# Runtime settings (can be overridden via env / cron)
 DRY_RUN="${DRY_RUN:-0}"
 QUALITY="${QUALITY:-85}"
+GRACE_SECONDS="${GRACE_SECONDS:-5}"
 
-# Run the conversion script via zconsole inside the Plone app
-DRY_RUN="$DRY_RUN" QUALITY="$QUALITY" \
-  "$ZCONSOLE" run "$ZOPE_CONF" "$SCRIPT" >> "$LOGFILE" 2>&1
+{
+  echo "--------------------------------------------------"
+  echo "$(date '+%Y-%m-%d %H:%M:%S')  WebP CRON JOB START"
+  echo "BACKEND=$BACKEND"
+  echo "DRY_RUN=$DRY_RUN"
+  echo "QUALITY=$QUALITY"
 
-echo "Restarting backend..." >> "$LOGFILE"
-# Restart backend in the background using runwsgi
-"$RUNWSGI" "$ZOPE_INI" >> "$LOGFILE" 2>&1 &
-sleep 3
+  echo "Stopping backend (runwsgi)…"
 
-echo "$(date '+%Y-%m-%d %H:%M:%S')  WebP CRON JOB END" >> "$LOGFILE"
-echo "--------------------------------------------------" >> "$LOGFILE"
+  # Find the runwsgi process using this zope.ini (if any)
+  PID="$(pgrep -f "runwsgi.*${ZOPE_INI##*/}" || true)"
+
+  if [ -n "$PID" ]; then
+      echo "Found runwsgi PID: $PID → stopping"
+      kill "$PID"
+      sleep "$GRACE_SECONDS"
+  else
+      echo "Backend not running (no matching runwsgi PID found)."
+  fi
+
+  echo "Running WebP converter…"
+  DRY_RUN="$DRY_RUN" QUALITY="$QUALITY" \
+    "$ZCONSOLE" run "$ZOPE_CONF" "$SCRIPT"
+
+  echo "Restarting backend via runwsgi…"
+  "$RUNWSGI" "$ZOPE_INI" &
+
+  echo "$(date '+%Y-%m-%d %H:%M:%S')  WebP CRON JOB END"
+  echo "--------------------------------------------------"
+} >> "$LOGFILE" 2>&1
