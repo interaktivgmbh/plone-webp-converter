@@ -1,10 +1,10 @@
 import gc
 import logging
-import os
 import sys
 import time
+from argparse import ArgumentParser
 from io import BytesIO
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import transaction
 from PIL import Image
@@ -13,39 +13,51 @@ from plone import api
 from plone.namedfile.file import NamedBlobImage
 from zope.component.hooks import setSite
 
-QUALITY: int = 85
-DRY_RUN: bool = False
-
-COMMIT_EVERY: int = 100
-PACK_DATABASE_AFTER: bool = True
-
-PLONE_SITE_ID: str = os.environ.get("PLONE_SITE_ID") or "Plone"
+DEFAULT_OPTIONS = {
+    "quality": {
+        "default": 85,
+        "type": int,
+        "help": "WebP quality (0–100). Default: 85.",
+    },
+    "dry-run": {
+        "default": False,
+        "action": "store_true",
+        "help": "Simulate conversion; do not write any data.",
+    },
+    "site-id": {
+        "default": "Plone",
+        "type": str,
+        "help": "Plone site ID. Default: 'Plone'.",
+    },
+    "no-pack": {
+        "default": False,
+        "action": "store_true",
+        "help": "Skip ZODB packing after conversion.",
+    },
+    "commit-every": {
+        "default": 100,
+        "type": int,
+        "help": "Commit transaction every N processed objects. Default: 100.",
+    },
+}
 
 PORTAL_TYPES = ["Image", "News Item", "Event", "File", "Document"]
 
 
-def safe_int(value: Any, default: int) -> int:
+def pack_database(logger: logging.Logger, portal: Any) -> None:
+    """Pack the ZODB database."""
     try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
+        conn = portal._p_jar
+        db = conn.db()
+        logger.info("Packing ZODB...")
+        db.pack()
+        logger.info("ZODB pack completed.")
+    except Exception as exc:
+        logger.error("ZODB pack failed: %s", exc)
 
 
-def load_config() -> None:
-    global QUALITY, DRY_RUN, PLONE_SITE_ID, PACK_DATABASE_AFTER
-
-    QUALITY = safe_int(os.environ.get("QUALITY", QUALITY), QUALITY)
-    DRY_RUN = bool(safe_int(os.environ.get("DRY_RUN", int(DRY_RUN)), int(DRY_RUN)))
-    PLONE_SITE_ID = os.environ.get("PLONE_SITE_ID") or PLONE_SITE_ID
-    PACK_DATABASE_AFTER = not DRY_RUN
-
-
-def progress_bar(
-    current: int,
-    total: int,
-    start_time: float,
-    length: int = 30,
-) -> str:
+def progress_bar(current: int, total: int, start_time: float, length: int = 30) -> str:
+    """Render terminal progress bar."""
     if total <= 0:
         return ""
 
@@ -57,148 +69,127 @@ def progress_bar(
     eta = (elapsed / current * (total - current)) if current > 0 else 0
 
     line = f"[{bar}] {percent * 100:5.1f}%  {current}/{total}  ETA {eta:5.1f}s"
-
     sys.stdout.write("\r" + line)
     sys.stdout.flush()
-
     return line
 
 
-def convert_blob_to_webp(blob_data: bytes) -> Optional[bytes]:
-    logger = logging.getLogger("webp-converter")
-
+def convert_blob_to_webp(blob_data: bytes, config: Dict[str, Any], logger: logging.Logger) -> Optional[bytes]:
+    """Convert a blob to WebP format."""
     try:
         img = Image.open(BytesIO(blob_data))
 
-        if img.mode in ("RGBA", "LA") or (
-            img.mode == "P" and "transparency" in img.info
-        ):
-            logger.info("PNG transparency detected → convert with alpha")
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            logger.info("PNG transparency detected; converting with alpha channel")
             img = img.convert("RGBA")
         else:
             img = img.convert("RGB")
 
         out = BytesIO()
-        img.save(
-            out,
-            "WEBP",
-            quality=QUALITY,
-            method=6,
-            lossless=False,
-        )
+        img.save(out, "WEBP", quality=config["quality"], method=6, lossless=False)
         return out.getvalue()
 
     except Exception as exc:
-        logger.error("WEBP conversion failed: %s", exc)
+        logger.error("WebP conversion failed: %s", exc)
         return None
 
 
-def process_object(obj: Any, logger: logging.Logger) -> bool:
-    candidate_fields = ["image", "event_image", "lead_image"]
+def process_object(obj: Any, config: Dict[str, Any], logger: logging.Logger) -> bool:
+    """Process a single Plone content object."""
+    fields = ["image", "event_image", "lead_image"]
     changed = False
 
-    for field_name in candidate_fields:
-        field_value = getattr(obj, field_name, None)
-        if not field_value:
-            continue
-
-        data = getattr(field_value, "data", None)
-        if not data:
+    for field in fields:
+        field_value = getattr(obj, field, None)
+        if not field_value or not getattr(field_value, "data", None):
             continue
 
         if getattr(field_value, "contentType", "").lower() == "image/webp":
-            logger.info("Skip already webp: %s", obj.absolute_url())
+            logger.info("Skip (already WebP): %s", obj.absolute_url())
             continue
 
-        webp_data = convert_blob_to_webp(data)
+        webp_data = convert_blob_to_webp(field_value.data, config, logger)
         if not webp_data:
-            logger.warning("Conversion failed: %s", obj.absolute_url())
+            logger.warning("Failed to convert %s", obj.absolute_url())
             continue
 
-        filename = field_value.filename or "image"
-        base = filename.rsplit(".", 1)[0]
+        base = (field_value.filename or "image").rsplit(".", 1)[0]
         new_filename = f"{base}.webp"
 
         logger.info(
-            "Convert %s → %s (quality=%s, dry_run=%s)",
+            "Convert %s -> %s (quality=%s dry_run=%s)",
             obj.absolute_url(),
             new_filename,
-            QUALITY,
-            DRY_RUN,
+            config["quality"],
+            config["dry_run"],
         )
 
-        if not DRY_RUN:
-            new_image = NamedBlobImage(
+        if not config["dry_run"]:
+            new_img = NamedBlobImage(
                 data=webp_data,
                 filename=new_filename,
                 contentType="image/webp",
             )
-            setattr(obj, field_name, new_image)
+            setattr(obj, field, new_img)
             changed = True
 
-    if changed and not DRY_RUN:
+    if changed and not config["dry_run"]:
         try:
             obj.reindexObject()
-        except Exception:
-            logger.debug("Reindex failed: %s", obj.absolute_url())
+        except ConflictError:
+            transaction.abort()
+            logger.error("ConflictError reindexing %s", obj.absolute_url())
+        except Exception as exc:
+            logger.debug("Reindex failed (%s): %s", obj.absolute_url(), exc)
 
     return changed
 
 
-def pack_database(logger: logging.Logger) -> None:
-    site = api.portal.get()
-    connection = site._p_jar
-    db = connection.db()
-    logger.info("Packing database...")
-    db.pack()
-    logger.info("Database packed.")
-
-
-def convert_all_images(logger: logging.Logger) -> None:
+def convert_all_images(config: Dict[str, Any], logger: logging.Logger, portal: Any) -> None:
+    """Walk catalog, convert images, batch commit."""
     catalog = api.portal.get_tool("portal_catalog")
     brains = catalog.unrestrictedSearchResults(portal_type=PORTAL_TYPES)
 
     total = len(brains)
-    if not brains:
-        logger.info("No image-related content found.")
+    if total == 0:
+        logger.info("No relevant objects found.")
         return
 
     logger.info("--------------------------------------------------")
-    logger.info("Starting image conversion")
-    logger.info("QUALITY=%s", QUALITY)
-    logger.info("DRY_RUN=%s", DRY_RUN)
-    logger.info("TOTAL OBJECTS=%s", total)
+    logger.info("Starting WebP conversion")
+    logger.info("Config: %s", config)
+    logger.info("Total objects: %s", total)
     logger.info("--------------------------------------------------")
 
     processed = skipped = failed = 0
-    portal = api.portal.get()
     start_time = time.time()
 
     for idx, brain in enumerate(brains, 1):
-        pb_line = progress_bar(idx, total, start_time)
         if idx == 1 or idx == total or idx % 50 == 0:
-            logger.info(pb_line)
+            logger.info(progress_bar(idx, total, start_time))
 
         try:
             obj = brain._unrestrictedGetObject()
         except ConflictError:
             failed += 1
+            transaction.abort()
             logger.error("ConflictError loading %s", brain.getPath())
             continue
         except Exception as exc:
             failed += 1
-            logger.error("Cannot load %s: %s", brain.getPath(), exc)
+            logger.error("Failed to load %s: %s", brain.getPath(), exc)
             continue
 
         try:
-            changed = process_object(obj, logger)
+            changed = process_object(obj, config, logger)
         except ConflictError:
             failed += 1
+            transaction.abort()
             logger.error("ConflictError processing %s", brain.getPath())
             continue
         except Exception as exc:
             failed += 1
-            logger.error("Error processing %s: %s", brain.getPath(), exc)
+            logger.error("Failed to process %s: %s", brain.getPath(), exc)
             continue
 
         if changed:
@@ -206,56 +197,74 @@ def convert_all_images(logger: logging.Logger) -> None:
         else:
             skipped += 1
 
-        if idx % COMMIT_EVERY == 0 and not DRY_RUN:
+        if idx % config["commit_every"] == 0 and not config["dry_run"]:
             transaction.commit()
             portal._p_jar.cacheMinimize()
             gc.collect()
-            logger.info("Committed at %s objects", idx)
+            logger.info("Committed at object %s", idx)
 
     sys.stdout.write("\n")
     sys.stdout.flush()
 
-    if not DRY_RUN:
+    if not config["dry_run"]:
         transaction.commit()
         portal._p_jar.cacheMinimize()
         gc.collect()
 
     logger.info("--------------------------------------------------")
     logger.info(
-        "DONE: %s converted, %s skipped, %s failed.",
+        "DONE - converted=%s  skipped=%s  failed=%s",
         processed,
         skipped,
         failed,
     )
     logger.info("--------------------------------------------------")
 
-    if not DRY_RUN and PACK_DATABASE_AFTER:
-        pack_database(logger)
+    if not config["dry_run"] and not config["no_pack"]:
+        pack_database(logger, portal)
+
+
+def get_config() -> Dict[str, Any]:
+    parser = ArgumentParser()
+
+    for key, opts in DEFAULT_OPTIONS.items():
+        parser.add_argument(f"--{key}", dest=key.replace("-", "_"), **opts)
+
+    args, _unknown = parser.parse_known_args()
+
+    return {
+        "quality": args.quality,
+        "dry_run": args.dry_run,
+        "site_id": args.site_id,
+        "no_pack": args.no_pack,
+        "commit_every": args.commit_every,
+    }
 
 
 def setup_logging() -> logging.Logger:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
+        format="%(asctime)s %(levelname)s  %(message)s",
         handlers=[logging.StreamHandler()],
         force=True,
     )
-    return logging.getLogger("webp-converter")
+    return logging.getLogger(__name__)
 
 
 def main(app: Any) -> None:
     logger = setup_logging()
-    load_config()
+    config = get_config()
 
-    site = app[PLONE_SITE_ID]
+    site = app[config["site_id"]]
     setSite(site)
 
-    logger.info("Using site /%s", PLONE_SITE_ID)
-    convert_all_images(logger)
+    portal = api.portal.get()
+
+    logger.info("Using site: /%s", config["site_id"])
+    convert_all_images(config, logger, portal)
 
 
 if __name__ == "__main__":
     if "app" not in globals():
         sys.exit(1)
-
     main(app)
