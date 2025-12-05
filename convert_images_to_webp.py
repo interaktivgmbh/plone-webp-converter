@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 import transaction
 from PIL import Image
+from Products.CMFPlone.Portal import PloneSite
 from ZODB.POSException import ConflictError
 from plone import api
 from plone.namedfile.file import NamedBlobImage
@@ -44,7 +45,7 @@ DEFAULT_OPTIONS = {
 PORTAL_TYPES = ["Image", "News Item", "Event", "File", "Document"]
 
 
-def pack_database(logger: logging.Logger, portal: Any) -> None:
+def pack_database(logger: logging.Logger, portal: PloneSite) -> None:
     """Pack the ZODB database."""
     try:
         conn = portal._p_jar
@@ -145,8 +146,9 @@ def process_object(obj: Any, config: Dict[str, Any], logger: logging.Logger) -> 
     return changed
 
 
-def convert_all_images(config: Dict[str, Any], logger: logging.Logger, portal: Any) -> None:
+def convert_all_images(config: Dict[str, Any], logger: logging.Logger) -> None:
     """Walk catalog, convert images, batch commit."""
+    portal = api.portal.get()
     catalog = api.portal.get_tool("portal_catalog")
     brains = catalog.unrestrictedSearchResults(portal_type=PORTAL_TYPES)
 
@@ -258,10 +260,8 @@ def main(app: Any) -> None:
     site = app[config["site_id"]]
     setSite(site)
 
-    portal = api.portal.get()
-
     logger.info("Using site: /%s", config["site_id"])
-    convert_all_images(config, logger, portal)
+    convert_all_images(config, logger)
 
 
 if __name__ == "__main__":
