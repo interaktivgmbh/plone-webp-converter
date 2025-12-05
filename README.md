@@ -9,6 +9,9 @@ The script focuses exclusively on image conversion.\
 Deployment decisions (start/stop lifecycle, supervisor/systemd
 integration, cron jobs, etc.) are intentionally left to each project.
 
+> **Important:** The Plone backend **must be fully stopped** before running this script.  
+> Running it while the backend is active can cause conflicts, partial writes, or locked blobs.
+
 ------------------------------------------------------------------------
 
 ## Features
