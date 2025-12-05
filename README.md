@@ -1,168 +1,99 @@
 # convert_images_to_webp.py
 
-A script to convert images already stored in Plone to WebP.
+A generic, project-independent helper script for converting images
+already stored in Plone to **WebP**.\
+It is designed for Plone 6 / Cookieplone backends and works with both
+classic Plone sites and Volto-based projects.
 
-The script is **project-independent** and works with **any Plone 6 backend**
-(Cookieplone/uv, Buildout, custom venv, Docker).
-It performs only the image conversion — all deployment logic (start/stop,
-cron automation, etc.) lives outside the script.
+The script focuses exclusively on image conversion.\
+Deployment decisions (start/stop lifecycle, supervisor/systemd
+integration, cron jobs, etc.) are intentionally left to each project.
 
----
+------------------------------------------------------------------------
 
-## What the script does
+## Features
 
-- Converts existing image fields to WebP
-- Preserves PNG transparency (alpha channel)
-- Skips images already stored as WebP
-- Shows a live progress bar (percent, count, ETA)
-- Allows dry-run mode to verify changes without writing anything
-- Supports configurable WebP quality
+-   Converts existing images to WebP
+-   Preserves PNG transparency (alpha channel)
+-   Skips images already stored as WebP
+-   Live progress bar (percentage, processed count, ETA)
+-   Fully configurable via **command-line parameters**
+-   Dry-run mode (no writes)
+-   Optional ZODB packing after conversion
+-   Batch commits for better performance on large sites
 
-By default, these Plone content types are scanned:
+By default, the script processes these Plone content types:
 
-- `Image`
-- `News Item`
-- `Event`
-- `File`
-- `Document`
+-   `Image`
+-   `News Item`
+-   `Event`
+-   `File`
+-   `Document`
 
-The script checks these fields:
+And inspects the following fields:
 
-- `image`
-- `event_image`
-- `lead_image`
+-   `image`
+-   `event_image`
+-   `lead_image`
 
----
+------------------------------------------------------------------------
 
 ## Requirements
 
-- Plone 6 backend (Volto or Classic)
-- Pillow (already included in Plone)
-- A working `zconsole` binary
+-   Plone backend
+-   Pillow installed (already included in Plone)
+-   A working **zconsole** binary
 
-Your backend may provide `zconsole` at:
+### Possible zconsole locations
 
-| Setup               | Path                          |
-|--------------------|-------------------------------|
-| Cookieplone / uv   | `.venv/bin/zconsole`          |
-| Buildout           | `bin/zconsole`                |
-| Custom venv        | `<venv>/bin/zconsole`         |
-| Docker image       | `/plone/instance/bin/zconsole` (example) |
-
-Find it via:
-
-```bash
-find . -type f -name "zconsole"
-```
-
+| Setup            | Path                          |
+|------------------|-------------------------------|
+| Cookieplone / uv | `.venv/bin/zconsole`          |
+| Buildout         | `bin/zconsole`                |
+| Custom venv      | `<venv>/bin/zconsole`         |
+| Docker           | `/plone/instance/bin/zconsole`|
 ---
+## CLI Configuration (No Environment Variables)
 
-## Configuration (environment variables)
+ All configuration is passed through command-line arguments:
 
-The script reads three simple environment variables:
+| Flag                 | Description                    | Default |
+|----------------------|--------------------------------|---------|
+| `--quality <int>`    | WebP quality (0–100)           | `85`    |
+| `--dry-run`          | Simulate conversion, no writes | `False` |
+| `--site-id <name>`   | Plone site ID                  | `Plone` |
+| `--no-pack`          | Skip ZODB packing              | `False` |
+| `--commit-every <n>` | Commit every N objects         | `100`   |
 
-- **QUALITY**
-  WebP quality (0–100)
-  Default: `85`
+------------------------------------------------------------------------
+## Running the Script
 
-- **DRY_RUN**
-  `1` → simulate conversion (no writes)
-  `0` → real conversion
-  Default: `0`
+### Dry-run test (recommended)
 
-- **PLONE_SITE_ID**
-  Plone site to operate on
-  Default: `Plone`
-
-If none are set, defaults are used.
-
----
-
-## One-off execution
-
-### 1. Find your zconsole path
-
-Example (Cookieplone):
-
-```bash
-.venv/bin/zconsole
+``` bash
+zconsole run instance/etc/zope.conf scripts/convert_images_to_webp.py --dry-run --quality=75
 ```
 
-Example (Buildout):
+### Real conversion
 
-```bash
-bin/zconsole
+``` bash
+zconsole run instance/etc/zope.conf scripts/convert_images_to_webp.py --quality=85
 ```
 
-Use whichever exists.
+------------------------------------------------------------------------
 
----
+## Running via Cron
 
-### 2. Dry-run test (recommended)
+### Example: nightly at 03:00
 
-```bash
-cd /path/to/backend
-
-DRY_RUN=1 QUALITY=75   <path-to-zconsole> run instance/etc/zope.conf scripts/convert_images_to_webp.py
+``` cron
+0 3 * * * cd /path/to/backend && .venv/bin/zconsole run instance/etc/zope.conf scripts/convert_images_to_webp.py --quality=85 >> var/log/webp_cron.log 2>&1
 ```
 
----
+------------------------------------------------------------------------
 
-### 3. Real conversion
+## Safety Notes
 
-```bash
-DRY_RUN=0 QUALITY=85   <path-to-zconsole> run instance/etc/zope.conf scripts/convert_images_to_webp.py
-```
-
-The script prints everything to stdout
-(progress bar, converted objects, skipped items, errors).
-
----
-
-## Cron job with backend start/stop
-
-If your project requires temporarily shutting down the backend during
-conversion (e.g. to avoid blob conflicts), this can be automated via the
-accompanying `run_webp_job.sh`.
-
-Example cronjob (runs daily at 03:00):
-
-```cron
-0 3 * * * /path/to/backend/scripts/run_webp_job.sh
-```
-
-The provided `run_webp_job.sh`:
-
-- stops the backend (runwsgi)
-- executes the WebP converter via zconsole
-- restarts the backend
-- writes all output to:
-
-```
-backend/var/log/webp_cron.log
-```
-
-To run it manually:
-
-```bash
-DRY_RUN=1 QUALITY=80 ./scripts/run_webp_job.sh
-```
-
-You may override:
-
-```bash
-DRY_RUN=1 QUALITY=50 LOGFILE=/custom/log/path ./scripts/run_webp_job.sh
-```
-
----
-
-## Operational notes & safety
-
-- With `DRY_RUN=0` the script **overwrites original images**.
-  There is no built-in backup or undo.
-- Always create a backup of:
-  - `Data.fs`
-  - blob directory
-- The initial run may take significant time depending on object count and image sizes.
-- Always start with a **dry run** and review the logfile.
-- Ideally run during low traffic times (e.g. late night).
+-   Running without `--dry-run` overwrites original images\
+-   Always back up `Data.fs` and blobstorage\
+-   Prefer running during low-traffic times
