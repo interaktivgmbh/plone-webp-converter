@@ -7,7 +7,7 @@ from io import BytesIO
 from typing import Any, Dict, Optional
 
 import transaction
-from PIL import Image
+from PIL import Image, ImageSequence
 from Products.CMFPlone.Portal import PloneSite
 from ZODB.POSException import ConflictError
 from plone import api
@@ -75,10 +75,52 @@ def progress_bar(current: int, total: int, start_time: float, length: int = 30) 
     return line
 
 
-def convert_blob_to_webp(blob_data: bytes, config: Dict[str, Any], logger: logging.Logger) -> Optional[bytes]:
+def convert_blob_to_webp(
+    blob_data: bytes, config: Dict[str, Any], logger: logging.Logger
+) -> Optional[bytes]:
     """Convert a blob to WebP format."""
     try:
         img = Image.open(BytesIO(blob_data))
+        fmt = (img.format or "").upper()
+
+        if fmt == "GIF":
+            if getattr(img, "is_animated", False) and getattr(img, "n_frames", 1) > 1:
+                frames = []
+                durations = []
+
+                for frame in ImageSequence.Iterator(img):
+                    fr = frame.convert("RGBA")
+                    frames.append(fr)
+
+                    d = frame.info.get("duration")
+                    if d is None:
+                        d = img.info.get("duration", 100)
+                    durations.append(d)
+
+                loop = img.info.get("loop", 0)
+
+                out = BytesIO()
+                frames[0].save(
+                    out,
+                    "WEBP",
+                    save_all=True,
+                    append_images=frames[1:],
+                    duration=durations,
+                    loop=loop,
+                    quality=config["quality"],
+                    method=6,
+                    lossless=False,
+                )
+                return out.getvalue()
+
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                img = img.convert("RGBA")
+            else:
+                img = img.convert("RGB")
+
+            out = BytesIO()
+            img.save(out, "WEBP", quality=config["quality"], method=6, lossless=False)
+            return out.getvalue()
 
         if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
             logger.info("PNG transparency detected; converting with alpha channel")
@@ -105,7 +147,9 @@ def process_object(obj: Any, config: Dict[str, Any], logger: logging.Logger) -> 
         if not field_value or not getattr(field_value, "data", None):
             continue
 
-        if getattr(field_value, "contentType", "").lower() == "image/webp":
+        content_type = (getattr(field_value, "contentType", "") or "").lower()
+
+        if content_type == "image/webp":
             logger.info("Skip (already WebP): %s", obj.absolute_url())
             continue
 
