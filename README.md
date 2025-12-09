@@ -17,10 +17,13 @@ integration, cron jobs, etc.) are intentionally left to each project.
 ## Features
 
 -   Converts existing images to WebP
+-   Converts GIFs to WebP (static and animated)
+    Note: animated GIFs converted to WebP may appear non-animated in some Plone previews (e.g. folder listings or image pickers).
+    When embedded on a page, they render normally as animated images.
 -   Preserves PNG transparency (alpha channel)
 -   Skips images already stored as WebP
 -   Live progress bar (percentage, processed count, ETA)
--   Fully configurable via **command-line parameters**
+-   Fully configurable via command-line parameters
 -   Dry-run mode (no writes)
 -   Optional ZODB packing after conversion
 -   Batch commits for better performance on large sites
