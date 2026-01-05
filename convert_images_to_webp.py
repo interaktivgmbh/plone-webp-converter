@@ -7,7 +7,7 @@ from io import BytesIO
 from typing import Any, Dict, Optional
 
 import transaction
-from PIL import Image, ImageSequence
+from PIL import Image, ImageSequence, features
 from Products.CMFPlone.Portal import PloneSite
 from ZODB.POSException import ConflictError
 from plone import api
@@ -40,13 +40,32 @@ DEFAULT_OPTIONS = {
         "type": int,
         "help": "Commit transaction every N processed objects. Default: 100.",
     },
+    "quiet-sniffer-warnings": {
+        "default": False,
+        "action": "store_true",
+        "help": (
+            "Suppress noisy plone.namedfile/Pillow sniffer warnings "
+            "(e.g. 'PIL can not recognize the image') when images still convert fine."
+        ),
+    },
+    "pillow-check": {
+        "default": False,
+        "action": "store_true",
+        "help": "Log Pillow feature support (webp/jpg/zlib) at startup.",
+    },
 }
 
 PORTAL_TYPES = ["Image", "News Item", "Event", "File", "Document"]
 
 
+class _IgnoreNamedfileSnifferWarning(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "plone.namedfile.utils":
+            return True
+        return "PIL can not recognize the image" not in record.getMessage()
+
+
 def pack_database(logger: logging.Logger, portal: PloneSite) -> None:
-    """Pack the ZODB database."""
     try:
         conn = portal._p_jar
         db = conn.db()
@@ -58,7 +77,6 @@ def pack_database(logger: logging.Logger, portal: PloneSite) -> None:
 
 
 def progress_bar(current: int, total: int, start_time: float, length: int = 30) -> str:
-    """Render terminal progress bar."""
     if total <= 0:
         return ""
 
@@ -75,10 +93,21 @@ def progress_bar(current: int, total: int, start_time: float, length: int = 30) 
     return line
 
 
+def log_pillow_features(logger: logging.Logger) -> None:
+    try:
+        checks = {
+            "webp": bool(features.check("webp")),
+            "jpg": bool(features.check("jpg")),
+            "zlib": bool(features.check("zlib")),
+        }
+        logger.info("Pillow features: %s", checks)
+    except Exception as exc:
+        logger.info("Pillow feature check not available: %s", exc)
+
+
 def convert_blob_to_webp(
     blob_data: bytes, config: Dict[str, Any], logger: logging.Logger
 ) -> Optional[bytes]:
-    """Convert a blob to WebP format."""
     try:
         img = Image.open(BytesIO(blob_data))
         fmt = (img.format or "").upper()
@@ -138,7 +167,6 @@ def convert_blob_to_webp(
 
 
 def process_object(obj: Any, config: Dict[str, Any], logger: logging.Logger) -> bool:
-    """Process a single Plone content object."""
     fields = ["image", "event_image", "lead_image"]
     changed = False
 
@@ -191,7 +219,6 @@ def process_object(obj: Any, config: Dict[str, Any], logger: logging.Logger) -> 
 
 
 def convert_all_images(config: Dict[str, Any], logger: logging.Logger) -> None:
-    """Walk catalog, convert images, batch commit."""
     portal = api.portal.get()
     catalog = api.portal.get_tool("portal_catalog")
     brains = catalog.unrestrictedSearchResults(portal_type=PORTAL_TYPES)
@@ -284,27 +311,39 @@ def get_config() -> Dict[str, Any]:
         "site_id": args.site_id,
         "no_pack": args.no_pack,
         "commit_every": args.commit_every,
+        "quiet_sniffer_warnings": args.quiet_sniffer_warnings,
+        "pillow_check": args.pillow_check,
     }
 
 
-def setup_logging() -> logging.Logger:
+def setup_logging(config: Dict[str, Any]) -> logging.Logger:
+    handlers = [logging.StreamHandler()]
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s  %(message)s",
-        handlers=[logging.StreamHandler()],
+        handlers=handlers,
         force=True,
     )
+
+    if config.get("quiet_sniffer_warnings"):
+        logging.getLogger().addFilter(_IgnoreNamedfileSnifferWarning())
+
     return logging.getLogger(__name__)
 
 
 def main(app: Any) -> None:
-    logger = setup_logging()
     config = get_config()
+    logger = setup_logging(config)
 
     site = app[config["site_id"]]
     setSite(site)
 
     logger.info("Using site: /%s", config["site_id"])
+
+    if config.get("pillow_check"):
+        log_pillow_features(logger)
+
     convert_all_images(config, logger)
 
 
